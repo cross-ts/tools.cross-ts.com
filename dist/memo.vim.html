@@ -56,10 +56,10 @@
                 </ul>
             </div>
             <div class="h-14 p-2 flex items-center border-t border-zinc-700">
-                <div class="flex items-center">
-                    <div class="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white font-bold">U</div>
-                    <span class="ml-2 font-semibold text-white">User</span>
-                </div>
+                <button id="config-btn" class="w-full flex items-center p-2 rounded hover:bg-zinc-700">
+                    <i class="fas fa-cog text-gray-400"></i>
+                    <span class="ml-2 font-semibold text-white">Config</span>
+                </button>
             </div>
         </div>
 
@@ -95,12 +95,12 @@
 
     <!-- コマンドバー -->
     <div id="command-bar" class="fixed bottom-0 left-0 right-0 h-8 bg-zinc-900 text-white items-center px-4 hidden font-mono">
-        <span class="text-lg">:</span>
+        <span id="command-key-display" class="text-lg">:</span>
         <input type="text" id="command-input" class="bg-transparent w-full ml-2 focus:outline-none">
     </div>
 
     <!-- モーダル -->
-    <div id="memo-modal" class="fixed inset-0 bg-black bg-opacity-60 items-center justify-center hidden">
+    <div id="memo-modal" class="fixed inset-0 bg-black bg-opacity-60 items-center justify-center hidden z-50">
         <div class="bg-zinc-800 rounded-lg shadow-xl p-6 w-full max-w-sm">
             <h3 id="modal-title" class="text-lg font-bold text-gray-100 mb-4"></h3>
             <input type="text" id="modal-input" class="w-full bg-zinc-700 border border-zinc-600 text-gray-200 rounded p-2 mb-4" placeholder="メモのタイトル">
@@ -112,7 +112,7 @@
     </div>
 
     <!-- 削除確認モーダル -->
-    <div id="delete-confirm-modal" class="fixed inset-0 bg-black bg-opacity-60 items-center justify-center hidden">
+    <div id="delete-confirm-modal" class="fixed inset-0 bg-black bg-opacity-60 items-center justify-center hidden z-50">
         <div class="bg-zinc-800 rounded-lg shadow-xl p-6 w-full max-w-sm">
             <h3 class="text-lg font-bold text-gray-100 mb-2">本当に削除しますか？</h3>
             <p id="delete-confirm-text" class="text-gray-400 mb-4"></p>
@@ -123,11 +123,29 @@
         </div>
     </div>
 
-    <!-- DuckDB Wasm -->
-    <script type="module">
-        import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm';
+    <!-- 設定モーダル -->
+    <div id="config-modal" class="fixed inset-0 bg-black bg-opacity-60 items-center justify-center hidden z-50">
+        <div class="bg-zinc-800 rounded-lg shadow-xl p-6 w-full max-w-md">
+            <h3 class="text-lg font-bold text-gray-100 mb-4">キーマップ設定 (エイリアス)</h3>
+            <div class="space-y-4">
+                <div>
+                    <label for="config-command-key-alias" class="block text-sm font-medium text-gray-300">コマンドモード開始キー (追加)</label>
+                    <input type="text" id="config-command-key-alias" class="mt-1 block w-full bg-zinc-700 border border-zinc-600 text-gray-200 rounded p-2" placeholder="デフォルト: :">
+                </div>
+                <div>
+                    <label for="config-normal-key-alias" class="block text-sm font-medium text-gray-300">ノーマルモード移行キー (追加)</label>
+                    <input type="text" id="config-normal-key-alias" class="mt-1 block w-full bg-zinc-700 border border-zinc-600 text-gray-200 rounded p-2" placeholder="デフォルト: Escape">
+                </div>
+            </div>
+            <div class="mt-6 flex justify-end space-x-2">
+                <button id="config-cancel-btn" class="px-4 py-2 bg-zinc-600 text-gray-200 rounded hover:bg-zinc-500">キャンセル</button>
+                <button id="config-save-btn" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">保存</button>
+            </div>
+        </div>
+    </div>
 
-        document.addEventListener('DOMContentLoaded', async () => {
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
             // --- DOM要素の取得 ---
             const memoList = document.getElementById('memo-list');
             const messageContainer = document.getElementById('message-container');
@@ -138,8 +156,9 @@
             const footerInputArea = document.getElementById('footer-input-area');
             const commandBar = document.getElementById('command-bar');
             const commandInput = document.getElementById('command-input');
+            const commandKeyDisplay = document.getElementById('command-key-display');
 
-            // モーダル関連の要素
+            // モーダル関連
             const memoModal = document.getElementById('memo-modal');
             const modalTitleEl = document.getElementById('modal-title');
             const modalInput = document.getElementById('modal-input');
@@ -151,9 +170,16 @@
             const deleteCancelBtn = document.getElementById('delete-cancel-btn');
             const deleteOkBtn = document.getElementById('delete-ok-btn');
 
+            const configBtn = document.getElementById('config-btn');
+            const configModal = document.getElementById('config-modal');
+            const configCommandKeyAliasInput = document.getElementById('config-command-key-alias');
+            const configNormalKeyAliasInput = document.getElementById('config-normal-key-alias');
+            const configSaveBtn = document.getElementById('config-save-btn');
+            const configCancelBtn = document.getElementById('config-cancel-btn');
+
             // --- 状態管理 ---
-            let db = null;
-            let connection = null;
+            const STORAGE_KEY = 'memoVimData';
+            let data = {};
             let activeMemoId = null;
             let mode = 'normal';
             let selectedMessageId = null;
@@ -162,6 +188,7 @@
             let jj_last_press = 0;
             let gg_last_press = 0;
             let completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
+            let config = {};
 
             // --- ヘルパー関数 ---
             const formatDate = (timestamp) => {
@@ -178,70 +205,53 @@
 
             const escapeHTML = (str) => String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m]);
 
-            // --- DuckDB 初期化とスキーマ設定 ---
-            const initDB = async () => {
-                const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
-                const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
-                const worker_url = URL.createObjectURL(
-                    new Blob([`importScripts("${bundle.mainWorker}");`], {type: 'text/javascript'})
-                );
-                const worker = new Worker(worker_url);
-                const logger = new duckdb.ConsoleLogger();
-                db = new duckdb.AsyncDuckDB(logger, worker);
-                await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-                URL.revokeObjectURL(worker_url);
-
-                // ★修正箇所: データベースの初期化方法を変更
-                // まずインメモリで起動し、その後OPFS上のファイルをアタッチする
-                await db.open(); // インメモリDBとして起動
-                connection = await db.connect();
-
-                // OPFS上のファイルをアタッチ
-                await connection.query("ATTACH 'memo.db';");
-                // アタッチしたDBをデフォルトとして使用
-                await connection.query("USE memo;");
+            // --- データ永続化 ---
+            const saveData = () => {
+                try {
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+                } catch (e) {
+                    console.error("データの保存に失敗しました:", e);
+                }
             };
 
-            const setupSchema = async () => {
-                await connection.query(`
-                    CREATE TABLE IF NOT EXISTS memos (
-                        id BIGINT PRIMARY KEY,
-                        name VARCHAR,
-                        createdAt TIMESTAMP
-                    );
-                `);
-                await connection.query(`
-                    CREATE TABLE IF NOT EXISTS messages (
-                        id BIGINT PRIMARY KEY,
-                        memo_id BIGINT,
-                        text VARCHAR,
-                        timestamp VARCHAR
-                    );
-                `);
+            const loadData = () => {
+                const savedData = localStorage.getItem(STORAGE_KEY);
+                const defaultConfig = { commandKeyAlias: '', normalKeyAlias: '' };
+                if (savedData) {
+                    data = JSON.parse(savedData);
+                    if (!data.memos) data.memos = [];
+                    if (!data.messages) data.messages = {};
+                    if (!data.config) data.config = defaultConfig;
+                } else {
+                    data = {
+                        memos: [],
+                        messages: {},
+                        config: defaultConfig
+                    };
+                }
+                config = { ...defaultConfig, ...data.config };
+                commandKeyDisplay.textContent = ':';
             };
 
-            const loadInitialState = async () => {
-                const result = await connection.query('SELECT id FROM memos ORDER BY createdAt DESC LIMIT 1;');
-                const memos = result.toArray().map(row => row.toJSON());
-                if (memos.length > 0) {
-                    activeMemoId = memos[0].id;
+            const loadInitialState = () => {
+                if (data.memos.length > 0) {
+                    const sortedMemos = [...data.memos].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                    activeMemoId = sortedMemos[0].id;
                 } else {
                     activeMemoId = null;
                 }
             };
 
             // --- レンダリング関数 ---
-            const render = async () => {
-                await renderSidebar();
-                await renderMainContent();
+            const render = () => {
+                renderSidebar();
+                renderMainContent();
             };
 
-            const renderSidebar = async () => {
-                const result = await connection.query('SELECT * FROM memos ORDER BY createdAt DESC;');
-                const memos = result.toArray().map(row => row.toJSON());
-
+            const renderSidebar = () => {
+                const sortedMemos = [...data.memos].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
                 memoList.innerHTML = '';
-                memos.forEach(memo => {
+                sortedMemos.forEach(memo => {
                     const li = document.createElement('li');
                     li.className = `memo-item flex items-center justify-between px-2 py-1 rounded cursor-pointer hover:bg-zinc-700 ${memo.id === activeMemoId ? 'bg-zinc-700 text-white' : ''}`;
                     li.dataset.memoId = memo.id;
@@ -259,24 +269,19 @@
                 });
             };
 
-            const renderMainContent = async () => {
-                const memosResult = await connection.query('SELECT * FROM memos');
-                if (activeMemoId && memosResult.numRows > 0) {
-                    footerInputArea.style.display = 'block';
-                    const activeMemoResult = await connection.query(`SELECT * FROM memos WHERE id = ${activeMemoId}`);
-                    const activeMemoArray = activeMemoResult.toArray().map(row => row.toJSON());
-
-                    if (activeMemoArray.length === 0) {
-                         await loadInitialState();
-                         await render();
-                         return;
+            const renderMainContent = () => {
+                if (activeMemoId && data.memos.length > 0) {
+                    const activeMemo = data.memos.find(m => m.id === activeMemoId);
+                    if (!activeMemo) {
+                        loadInitialState();
+                        render();
+                        return;
                     }
-                    const activeMemo = activeMemoArray[0];
-
+                    footerInputArea.style.display = 'block';
                     const formattedDate = formatDate(activeMemo.createdAt);
                     memoTitle.textContent = `${activeMemo.name} - ${formattedDate}`;
                     memoInput.placeholder = `#${activeMemo.name} にメモする (iで入力開始)`;
-                    await renderMessages();
+                    renderMessages();
                 } else {
                     memoTitle.textContent = 'メモがありません';
                     messageContainer.innerHTML = `
@@ -288,13 +293,11 @@
                 }
             };
 
-            const renderMessages = async () => {
+            const renderMessages = () => {
                 messageContainer.innerHTML = '';
                 if (!activeMemoId) return;
 
-                const messagesResult = await connection.query(`SELECT * FROM messages WHERE memo_id = ${activeMemoId} ORDER BY id ASC;`);
-                const messages = messagesResult.toArray().map(row => row.toJSON());
-
+                const messages = data.messages[activeMemoId] || [];
                 if (messages.length === 0) {
                     messageContainer.innerHTML = `
                         <div class="text-center text-gray-500 mt-10">
@@ -367,11 +370,11 @@
                 memoInput.focus();
             };
 
-            const enterEditMessageMode = async () => {
+            const enterEditMessageMode = () => {
                 if (!selectedMessageId) return;
                 mode = 'edit-message';
                 editingMessageId = selectedMessageId;
-                await renderMessages();
+                renderMessages();
             };
 
             const enterCommandMode = () => {
@@ -380,10 +383,9 @@
                 commandInput.focus();
             };
 
-            const updateSelectionUI = async () => {
+            const updateSelectionUI = () => {
                 if (!activeMemoId) return;
-                const messagesResult = await connection.query(`SELECT id FROM messages WHERE memo_id = ${activeMemoId} ORDER BY id ASC;`);
-                const messages = messagesResult.toArray().map(row => row.toJSON());
+                const messages = data.messages[activeMemoId] || [];
 
                 const messageElements = messageContainer.querySelectorAll('.message-item');
                 messageElements.forEach(el => el.classList.remove('selected'));
@@ -404,14 +406,14 @@
             };
 
             // --- モーダル処理 ---
-            const openModal = async (type, memoId = null) => {
+            const openModal = (type, memoId = null) => {
+                mode = 'modal';
                 if (type === 'add') {
                     modalTitleEl.textContent = '新しいメモを作成';
                     modalInput.value = '';
                     modalOkBtn.onclick = () => createNewMemoFromModal();
                 } else if (type === 'rename' && memoId) {
-                    const result = await connection.query(`SELECT name FROM memos WHERE id = ${memoId}`);
-                    const memo = result.toArray().map(row => row.toJSON())[0];
+                    const memo = data.memos.find(m => m.id === memoId);
                     modalTitleEl.textContent = 'メモ名を変更';
                     modalInput.value = memo.name;
                     modalOkBtn.onclick = () => renameMemo(memoId);
@@ -423,100 +425,103 @@
             const closeModal = () => {
                 memoModal.style.display = 'none';
                 deleteConfirmModal.style.display = 'none';
+                configModal.style.display = 'none';
                 enterNormalMode();
             };
 
             // --- CRUD操作 ---
-            const createNewMemoFromModal = async () => {
+            const createNewMemoFromModal = () => {
                 const name = modalInput.value.trim();
-                if (name) await handleEditCommand(name);
+                if (name) handleEditCommand(name);
                 closeModal();
             };
 
-            const handleEditCommand = async (memoName) => {
+            const handleEditCommand = (memoName) => {
                 if (!memoName) return;
-                const pStmt = await connection.prepare('SELECT id FROM memos WHERE name = ?');
-                const result = await pStmt.query(memoName);
-                const existingMemo = result.toArray().map(row => row.toJSON());
-                await pStmt.close();
-
-                if (existingMemo.length > 0) {
-                    activeMemoId = existingMemo[0].id;
+                const existingMemo = data.memos.find(m => m.name === memoName);
+                if (existingMemo) {
+                    activeMemoId = existingMemo.id;
                 } else {
                     const now = Date.now();
-                    const insertStmt = await connection.prepare('INSERT INTO memos (id, name, createdAt) VALUES (?, ?, ?)');
-                    await insertStmt.query(now, memoName, new Date());
-                    await insertStmt.close();
+                    const newMemo = { id: now, name: memoName, createdAt: new Date().toISOString() };
+                    data.memos.push(newMemo);
+                    data.messages[now] = [];
                     activeMemoId = now;
+                    saveData();
                 }
-                await render();
+                render();
             };
 
-            const renameMemo = async (memoId) => {
+            const renameMemo = (memoId) => {
                 const newName = modalInput.value.trim();
-                if (newName) {
-                    const pStmt = await connection.prepare('UPDATE memos SET name = ? WHERE id = ?');
-                    await pStmt.query(newName, memoId);
-                    await pStmt.close();
-                    await render();
+                const memoIndex = data.memos.findIndex(m => m.id === memoId);
+                if (newName && memoIndex !== -1) {
+                    data.memos[memoIndex].name = newName;
+                    saveData();
+                    render();
                 }
                 closeModal();
             };
 
-            const confirmDeleteMemo = async (memoId) => {
-                const result = await connection.query(`SELECT name FROM memos WHERE id = ${memoId}`);
-                const memo = result.toArray().map(row => row.toJSON())[0];
+            const confirmDeleteMemo = (memoId) => {
+                mode = 'modal';
+                const memo = data.memos.find(m => m.id === memoId);
                 if (!memo) return;
                 deleteConfirmText.textContent = `メモ「${escapeHTML(memo.name)}」を削除します。この操作は取り消せません。`;
                 deleteConfirmModal.style.display = 'flex';
                 deleteOkBtn.onclick = () => deleteMemo(memoId);
             };
 
-            const deleteMemo = async (memoId) => {
+            const deleteMemo = (memoId) => {
                 if (!memoId) return;
-                await connection.query(`DELETE FROM messages WHERE memo_id = ${memoId}`);
-                await connection.query(`DELETE FROM memos WHERE id = ${memoId}`);
+                const currentIndex = data.memos.findIndex(m => m.id === memoId);
+                data.memos = data.memos.filter(m => m.id !== memoId);
+                delete data.messages[memoId];
 
                 if (activeMemoId === memoId) {
-                    await loadInitialState();
+                    if (data.memos.length > 0) {
+                        const newIndex = Math.max(0, currentIndex - 1);
+                        activeMemoId = data.memos[newIndex].id;
+                    } else {
+                        activeMemoId = null;
+                    }
                 }
-                await render();
+                saveData();
+                render();
                 closeModal();
             };
 
-            const addMessage = async () => {
+            const addMessage = () => {
                 const text = memoInput.value.trim();
                 if (text && activeMemoId) {
                     const timestamp = new Date().toLocaleString('ja-JP');
-                    const newMessageId = Date.now();
-                    const pStmt = await connection.prepare('INSERT INTO messages (id, memo_id, text, timestamp) VALUES (?, ?, ?, ?)');
-                    await pStmt.query(newMessageId, activeMemoId, text, timestamp);
-                    await pStmt.close();
-
-                    await renderMessages();
+                    const newMessage = { id: Date.now(), text, timestamp };
+                    if (!data.messages[activeMemoId]) {
+                        data.messages[activeMemoId] = [];
+                    }
+                    data.messages[activeMemoId].push(newMessage);
+                    saveData();
+                    renderMessages();
                     memoInput.value = '';
                     memoInput.style.height = 'auto';
                 }
             };
 
-            const parseAndExecuteCommand = async (commandText) => {
+            const parseAndExecuteCommand = (commandText) => {
                 const [command, ...args] = commandText.split(/\s+/);
                 const arg = args.join(' ');
                 switch(command) {
                     case 'e':
-                        await handleEditCommand(arg);
+                        handleEditCommand(arg);
                         break;
                     case 'bd':
                         if (arg) {
-                            const pStmt = await connection.prepare('SELECT id FROM memos WHERE name = ?');
-                            const result = await pStmt.query(arg);
-                            const memoToDelete = result.toArray().map(row => row.toJSON())[0];
-                            await pStmt.close();
+                            const memoToDelete = data.memos.find(m => m.name === arg);
                             if (memoToDelete) {
-                                await deleteMemo(memoToDelete.id);
+                                deleteMemo(memoToDelete.id);
                             }
                         } else {
-                            await deleteMemo(activeMemoId);
+                            deleteMemo(activeMemoId);
                         }
                         break;
                 }
@@ -525,42 +530,44 @@
             // --- イベントリスナー ---
             addMemoBtn.addEventListener('click', () => openModal('add'));
 
-            memoList.addEventListener('click', async (e) => {
+            memoList.addEventListener('click', (e) => {
                 const memoItem = e.target.closest('.memo-item');
                 if (!memoItem) return;
                 const memoId = Number(memoItem.dataset.memoId);
                 if (e.target.closest('.rename-btn')) {
-                    await openModal('rename', memoId);
+                    openModal('rename', memoId);
                 } else if (e.target.closest('.delete-btn')) {
-                    await confirmDeleteMemo(memoId);
+                    confirmDeleteMemo(memoId);
                 } else {
                     activeMemoId = memoId;
                     selectedMessageId = null;
                     selectedItemIndex = -1;
-                    await render();
+                    render();
                 }
             });
 
-            messageContainer.addEventListener('keydown', async e => {
+            messageContainer.addEventListener('keydown', e => {
                 if (mode === 'edit-message' && e.target.id.startsWith('edit-input-')) {
-                    const saveChanges = async () => {
+                    const saveChanges = () => {
                         const messageId = Number(e.target.dataset.messageId);
-                        const pStmt = await connection.prepare('UPDATE messages SET text = ? WHERE id = ?');
-                        await pStmt.query(e.target.value, messageId);
-                        await pStmt.close();
+                        const msgIndex = data.messages[activeMemoId].findIndex(m => m.id === messageId);
+                        if (msgIndex !== -1) {
+                            data.messages[activeMemoId][msgIndex].text = e.target.value;
+                            saveData();
+                        }
                         enterNormalMode();
-                        await renderMessages();
+                        renderMessages();
                     };
 
-                    if (e.key === 'Escape') {
+                    if (e.key === 'Escape' || (config.normalKeyAlias && e.key === config.normalKeyAlias)) {
                         e.preventDefault();
-                        await saveChanges();
+                        saveChanges();
                     } else if (e.key === 'j') {
                         const now = Date.now();
                         if (now - jj_last_press < 300) {
                             e.preventDefault();
                             e.target.value = e.target.value.slice(0, -1);
-                            await saveChanges();
+                            saveChanges();
                         }
                         jj_last_press = now;
                     } else {
@@ -577,8 +584,8 @@
                 if (mode === 'insert') enterNormalMode();
                 memoInputContainer.classList.remove('border-blue-500');
             });
-            memoInput.addEventListener('keydown', async (e) => {
-                if (e.key === 'Escape') {
+            memoInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' || (config.normalKeyAlias && e.key === config.normalKeyAlias)) {
                     e.preventDefault();
                     memoInput.blur();
                     return;
@@ -590,11 +597,10 @@
                         e.stopPropagation();
                         memoInput.value = memoInput.value.slice(0, -1);
                         if (!activeMemoId) return;
-                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
-                        const count = result.toArray()[0].toJSON().count;
-                        selectedItemIndex = Number(count);
+                        const messages = data.messages[activeMemoId] || [];
+                        selectedItemIndex = messages.length;
                         memoInput.blur();
-                        await updateSelectionUI();
+                        updateSelectionUI();
                     }
                     jj_last_press = now;
                 } else {
@@ -602,7 +608,7 @@
                 }
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                     e.preventDefault();
-                    await addMessage();
+                    addMessage();
                 }
             });
 
@@ -611,7 +617,7 @@
                 memoInput.style.height = (memoInput.scrollHeight) + 'px';
             });
 
-            commandInput.addEventListener('keydown', async (e) => {
+            commandInput.addEventListener('keydown', (e) => {
                 const value = commandInput.value;
                 const [command, ...args] = value.split(/\s+/);
 
@@ -623,10 +629,10 @@
                     }
                     const currentPartial = args.join(' ');
                     if (completionState.matches.length === 0 || currentPartial !== completionState.matches[completionState.index]) {
-                        const pStmt = await connection.prepare('SELECT name FROM memos WHERE name LIKE ? ORDER BY name');
-                        const result = await pStmt.query(currentPartial + '%');
-                        const foundMatches = result.toArray().map(row => row.toJSON().name);
-                        await pStmt.close();
+                        const foundMatches = data.memos
+                            .filter(memo => memo.name.startsWith(currentPartial))
+                            .map(memo => memo.name)
+                            .sort();
 
                         if (foundMatches.length > 0) {
                             completionState = { baseCommand: command, originalPartial: currentPartial, matches: foundMatches, index: 0 };
@@ -647,12 +653,12 @@
                     const newValue = value.substring(0, startIndex) + value.substring(cursorPosition);
                     commandInput.value = newValue;
                     commandInput.selectionStart = commandInput.selectionEnd = startIndex;
-                } else if (e.key === 'Escape' || (e.ctrlKey && e.key.toLowerCase() === 'c')) {
+                } else if (e.key === 'Escape' || (config.normalKeyAlias && e.key === config.normalKeyAlias) || (e.ctrlKey && e.key.toLowerCase() === 'c')) {
                     e.preventDefault();
                     enterNormalMode();
                 } else if (e.key === 'Enter') {
                     e.preventDefault();
-                    await parseAndExecuteCommand(commandInput.value.trim());
+                    parseAndExecuteCommand(commandInput.value.trim());
                     enterNormalMode();
                 }
                 if (e.key !== 'Tab') {
@@ -669,36 +675,54 @@
                 if (e.key === 'Enter') modalOkBtn.onclick();
             });
 
-            document.addEventListener('keydown', async (e) => {
-                if (mode === 'normal' && activeMemoId) {
+            configBtn.addEventListener('click', () => {
+                mode = 'modal';
+                configCommandKeyAliasInput.value = config.commandKeyAlias;
+                configNormalKeyAliasInput.value = config.normalKeyAlias;
+                configModal.style.display = 'flex';
+            });
+            configCancelBtn.addEventListener('click', closeModal);
+            configSaveBtn.addEventListener('click', () => {
+                config.commandKeyAlias = configCommandKeyAliasInput.value;
+                config.normalKeyAlias = configNormalKeyAliasInput.value;
+                data.config = config;
+                saveData();
+                closeModal();
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (mode !== 'normal') return;
+
+                const isCommandKeyPressed = e.key === ':' || (config.commandKeyAlias && e.key === config.commandKeyAlias);
+
+                if (isCommandKeyPressed) {
+                    e.preventDefault();
+                    enterCommandMode();
+                } else if (activeMemoId) {
                     if (e.key === 'i' || e.key === 'a') {
                         e.preventDefault();
-                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
-                        const count = result.toArray()[0].toJSON().count;
-                        if (selectedItemIndex >= 0 && selectedItemIndex < count) {
-                            await enterEditMessageMode();
+                        const messages = data.messages[activeMemoId] || [];
+                        if (selectedItemIndex >= 0 && selectedItemIndex < messages.length) {
+                            enterEditMessageMode();
                         } else {
                             enterInsertMode();
                         }
-                    } else if (e.key === ':' || e.key === ';') {
-                        e.preventDefault();
-                        enterCommandMode();
                     } else if (e.key === 'j' || e.key === 'k') {
                         e.preventDefault();
-                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
-                        const itemCount = Number(result.toArray()[0].toJSON().count);
+                        const messages = data.messages[activeMemoId] || [];
+                        const itemCount = messages.length;
 
                         if (e.key === 'j') selectedItemIndex = Math.min(selectedItemIndex + 1, itemCount);
                         else selectedItemIndex = Math.max(selectedItemIndex - 1, -1);
-                        await updateSelectionUI();
+                        updateSelectionUI();
                     } else if (e.key === 'g') {
                         const now = Date.now();
                         if (now - gg_last_press < 400) {
                             e.preventDefault();
-                            const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
-                            if (result.toArray()[0].toJSON().count > 0) {
+                            const messages = data.messages[activeMemoId] || [];
+                            if (messages.length > 0) {
                                 selectedItemIndex = 0;
-                                await updateSelectionUI();
+                                updateSelectionUI();
                             }
                             gg_last_press = 0;
                         } else {
@@ -706,41 +730,36 @@
                         }
                     } else if (e.shiftKey && e.key.toUpperCase() === 'G') {
                         e.preventDefault();
-                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
-                        selectedItemIndex = Number(result.toArray()[0].toJSON().count);
-                        await updateSelectionUI();
+                        const messages = data.messages[activeMemoId] || [];
+                        selectedItemIndex = messages.length;
+                        updateSelectionUI();
                     } else if (e.shiftKey && (e.key.toUpperCase() === 'J' || e.key.toUpperCase() === 'K')) {
                         e.preventDefault();
-                        const result = await connection.query('SELECT id FROM memos ORDER BY createdAt DESC');
-                        const memos = result.toArray().map(row => row.toJSON());
-                        if (memos.length < 2) return;
-                        const currentIndex = memos.findIndex(m => m.id === activeMemoId);
+                        const sortedMemos = [...data.memos].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                        if (sortedMemos.length < 2) return;
+                        const currentIndex = sortedMemos.findIndex(m => m.id === activeMemoId);
                         let nextIndex;
                         if (e.shiftKey && e.key.toUpperCase() === 'J') {
-                             nextIndex = (currentIndex + 1) % memos.length;
+                             nextIndex = (currentIndex + 1) % sortedMemos.length;
                         } else {
-                             nextIndex = (currentIndex - 1 + memos.length) % memos.length;
+                             nextIndex = (currentIndex - 1 + sortedMemos.length) % sortedMemos.length;
                         }
-                        activeMemoId = memos[nextIndex].id;
+                        activeMemoId = sortedMemos[nextIndex].id;
                         selectedMessageId = null;
                         selectedItemIndex = -1;
-                        await render();
+                        render();
                     }
-                } else if (mode === 'normal' && (e.key === ':' || e.key === ';')) {
-                     e.preventDefault();
-                     enterCommandMode();
                 }
             });
 
             // --- 初期化 ---
             try {
-                await initDB();
-                await setupSchema();
-                await loadInitialState();
-                await render();
+                loadData();
+                loadInitialState();
+                render();
             } catch (err) {
                 console.error(err);
-                alert("データベースの初期化に失敗しました。コンソールを確認してください。");
+                alert("アプリの初期化に失敗しました。");
             }
         });
     </script>
