@@ -40,9 +40,10 @@
         </button>
     </header>
 
-    <div id="userIdDisplay" class="text-center text-gray-600 text-sm mb-6 hidden">
+    <!-- ユーザーID表示はローカルストレージでは不要なため削除 -->
+    <!-- <div id="userIdDisplay" class="text-center text-gray-600 text-sm mb-6 hidden">
         ユーザーID: <span id="currentUserId" class="font-mono bg-gray-200 px-2 py-1 rounded-md text-xs"></span>
-    </div>
+    </div> -->
 
     <div id="notesContainer" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         <!-- ノートがここに動的に挿入されます -->
@@ -94,20 +95,13 @@
         </div>
     </div>
 
-    <!-- ローディング表示 -->
-    <div id="loadingOverlay" class="fixed inset-0 bg-gray-100 flex items-center justify-center z-50">
+    <!-- ローディング表示はローカルストレージでは不要なため削除 -->
+    <!-- <div id="loadingOverlay" class="fixed inset-0 bg-gray-100 flex items-center justify-center z-50">
         <div class="text-xl font-semibold text-gray-700">読み込み中...</div>
-    </div>
+    </div> -->
 
-    <!-- Firebase SDK -->
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, doc, updateDoc, deleteDoc, onSnapshot, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        let db;
-        let auth;
-        let currentUserId = null;
+        let notes = []; // ノートデータを保持する配列
         let currentEditingNoteId = null; // 編集中のノートID
 
         const notesContainer = document.getElementById('notesContainer');
@@ -120,69 +114,34 @@
         const noteForm = document.getElementById('noteForm');
         const cancelNoteButton = document.getElementById('cancelNoteButton');
         const saveNoteButton = document.getElementById('saveNoteButton');
-        const loadingOverlay = document.getElementById('loadingOverlay');
-        const userIdDisplay = document.getElementById('userIdDisplay');
-        const currentUserIdSpan = document.getElementById('currentUserId');
 
-        // Firebaseの初期化と認証
-        async function initializeFirebase() {
-            try {
-                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
+        const LOCAL_STORAGE_KEY = 'modernNotes'; // ローカルストレージのキー
 
-                onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        currentUserId = user.uid;
-                        currentUserIdSpan.textContent = currentUserId;
-                        userIdDisplay.classList.remove('hidden');
-                        setupRealtimeNotesListener();
-                    } else {
-                        if (typeof __initial_auth_token !== 'undefined') {
-                            try {
-                                await signInWithCustomToken(auth, __initial_auth_token);
-                            } catch (error) {
-                                console.error("カスタムトークンでのサインインに失敗しました:", error);
-                                await signInAnonymously(auth); // フォールバックとして匿名認証
-                            }
-                        } else {
-                            await signInAnonymously(auth);
-                        }
-                    }
-                    loadingOverlay.classList.add('hidden'); // 認証状態が確定したらローディング終了
-                });
-            } catch (error) {
-                console.error("Firebaseの初期化または認証中にエラーが発生しました:", error);
-                loadingOverlay.classList.add('hidden');
-            }
+        // ノートデータをローカルストレージに保存する関数
+        function saveNotesToLocalStorage() {
+            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(notes));
         }
 
-        // ノートのリアルタイムリスナー設定
-        function setupRealtimeNotesListener() {
-            if (!db || !currentUserId) {
-                console.error("FirestoreまたはユーザーIDが利用できません。");
-                return;
+        // ノートデータをローカルストレージから読み込む関数
+        function loadNotesFromLocalStorage() {
+            const storedNotes = localStorage.getItem(LOCAL_STORAGE_KEY);
+            if (storedNotes) {
+                notes = JSON.parse(storedNotes);
+                // DateオブジェクトはJSON.parseで文字列になるため、再度Dateオブジェクトに変換
+                notes.forEach(note => {
+                    if (note.createdAt) note.createdAt = new Date(note.createdAt);
+                    if (note.updatedAt) note.updatedAt = new Date(note.updatedAt);
+                });
+            } else {
+                notes = [];
             }
-
-            const notesCollectionRef = collection(db, `artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${currentUserId}/notes`);
-            const q = query(notesCollectionRef);
-
-            onSnapshot(q, (snapshot) => {
-                const fetchedNotes = snapshot.docs.map(doc => ({
-                    id: doc.id,
-                    ...doc.data()
-                }));
-                // 日付でソート（新しいものが上に来るように）
-                fetchedNotes.sort((a, b) => (b.createdAt?.toDate() || 0) - (a.createdAt?.toDate() || 0));
-                renderNotes(fetchedNotes);
-            }, (error) => {
-                console.error("ノートの取得中にエラーが発生しました:", error);
-            });
+            // 日付でソート（新しいものが上に来るように）
+            notes.sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
+            renderNotes();
         }
 
         // ノートをDOMにレンダリングする関数
-        function renderNotes(notes) {
+        function renderNotes() {
             notesContainer.innerHTML = ''; // 既存のノートをクリア
             if (notes.length === 0) {
                 emptyState.classList.remove('hidden');
@@ -270,45 +229,36 @@
                 return;
             }
 
-            if (!db || !currentUserId) {
-                console.error("FirestoreまたはユーザーIDが利用できません。");
-                return;
+            const now = new Date();
+            if (currentEditingNoteId) {
+                // 既存のノートを更新
+                notes = notes.map(note =>
+                    note.id === currentEditingNoteId
+                        ? { ...note, title: title, content: content, updatedAt: now }
+                        : note
+                );
+                console.log("ノートが更新されました:", currentEditingNoteId);
+            } else {
+                // 新しいノートを追加
+                const newNote = {
+                    id: crypto.randomUUID(), // ユニークなIDを生成
+                    title: title,
+                    content: content,
+                    createdAt: now,
+                    updatedAt: now,
+                };
+                notes.push(newNote);
+                console.log("新しいノートが追加されました。");
             }
-
-            try {
-                if (currentEditingNoteId) {
-                    // 既存のノートを更新
-                    const noteRef = doc(db, `artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${currentUserId}/notes`, currentEditingNoteId);
-                    await updateDoc(noteRef, {
-                        title: title,
-                        content: content,
-                        updatedAt: new Date(),
-                    });
-                    console.log("ノートが更新されました:", currentEditingNoteId);
-                } else {
-                    // 新しいノートを追加
-                    const notesCollectionRef = collection(db, `artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${currentUserId}/notes`);
-                    await addDoc(notesCollectionRef, {
-                        title: title,
-                        content: content,
-                        createdAt: new Date(),
-                        updatedAt: new Date(),
-                    });
-                    console.log("新しいノートが追加されました。");
-                }
-                closeNoteModal();
-            } catch (e) {
-                console.error("ノートの保存中にエラーが発生しました:", e);
-            }
+            saveNotesToLocalStorage(); // ローカルストレージに保存
+            // 日付でソート（新しいものが上に来るように）
+            notes.sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
+            renderNotes(); // UIを更新
+            closeNoteModal();
         };
 
         // ノートの削除処理
         async function handleDeleteNote(id) {
-            if (!db || !currentUserId) {
-                console.error("FirestoreまたはユーザーIDが利用できません。");
-                return;
-            }
-
             // カスタム確認モーダルを表示
             const confirmDelete = await new Promise(resolve => {
                 const modal = document.createElement('div');
@@ -335,12 +285,10 @@
             });
 
             if (confirmDelete) {
-                try {
-                    await deleteDoc(doc(db, `artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${currentUserId}/notes`, id));
-                    console.log("ノートが削除されました:", id);
-                } catch (e) {
-                    console.error("ノートの削除中にエラーが発生しました:", e);
-                }
+                notes = notes.filter(note => note.id !== id);
+                saveNotesToLocalStorage(); // ローカルストレージに保存
+                renderNotes(); // UIを更新
+                console.log("ノートが削除されました:", id);
             }
         }
 
@@ -355,8 +303,8 @@
             }
         };
 
-        // 初期化
-        window.onload = initializeFirebase;
+        // 初期化 - ページ読み込み時にローカルストレージからノートを読み込む
+        window.onload = loadNotesFromLocalStorage;
     </script>
 </body>
 </html>
