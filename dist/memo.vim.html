@@ -123,599 +123,626 @@
         </div>
     </div>
 
+    <!-- DuckDB Wasm -->
+    <script type="module">
+        import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm';
 
-    <script>
-    document.addEventListener('DOMContentLoaded', () => {
-        // --- DOM要素の取得 ---
-        const memoList = document.getElementById('memo-list');
-        const messageContainer = document.getElementById('message-container');
-        const memoInput = document.getElementById('memo-input');
-        const memoInputContainer = document.getElementById('memo-input-container');
-        const memoTitle = document.getElementById('memo-title');
-        const addMemoBtn = document.getElementById('add-memo-btn');
-        const footerInputArea = document.getElementById('footer-input-area');
-        const commandBar = document.getElementById('command-bar');
-        const commandInput = document.getElementById('command-input');
+        document.addEventListener('DOMContentLoaded', async () => {
+            // --- DOM要素の取得 ---
+            const memoList = document.getElementById('memo-list');
+            const messageContainer = document.getElementById('message-container');
+            const memoInput = document.getElementById('memo-input');
+            const memoInputContainer = document.getElementById('memo-input-container');
+            const memoTitle = document.getElementById('memo-title');
+            const addMemoBtn = document.getElementById('add-memo-btn');
+            const footerInputArea = document.getElementById('footer-input-area');
+            const commandBar = document.getElementById('command-bar');
+            const commandInput = document.getElementById('command-input');
 
-        // モーダル関連の要素
-        const memoModal = document.getElementById('memo-modal');
-        const modalTitleEl = document.getElementById('modal-title');
-        const modalInput = document.getElementById('modal-input');
-        const modalCancelBtn = document.getElementById('modal-cancel-btn');
-        const modalOkBtn = document.getElementById('modal-ok-btn');
+            // モーダル関連の要素
+            const memoModal = document.getElementById('memo-modal');
+            const modalTitleEl = document.getElementById('modal-title');
+            const modalInput = document.getElementById('modal-input');
+            const modalCancelBtn = document.getElementById('modal-cancel-btn');
+            const modalOkBtn = document.getElementById('modal-ok-btn');
 
-        const deleteConfirmModal = document.getElementById('delete-confirm-modal');
-        const deleteConfirmText = document.getElementById('delete-confirm-text');
-        const deleteCancelBtn = document.getElementById('delete-cancel-btn');
-        const deleteOkBtn = document.getElementById('delete-ok-btn');
+            const deleteConfirmModal = document.getElementById('delete-confirm-modal');
+            const deleteConfirmText = document.getElementById('delete-confirm-text');
+            const deleteCancelBtn = document.getElementById('delete-cancel-btn');
+            const deleteOkBtn = document.getElementById('delete-ok-btn');
 
-        // --- 状態管理 ---
-        const STORAGE_KEY = 'slackMemoApp_data';
-        let data = { memos: [], messages: {} };
-        let activeMemoId = null;
-        let mode = 'normal'; // 'normal', 'insert', 'command', 'edit-message'
-        let selectedMessageId = null;
-        let selectedItemIndex = -1; // -1: none, 0-n: message, messages.length: input
-        let editingMessageId = null;
-        let jj_last_press = 0;
-        let gg_last_press = 0;
-        let completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
+            // --- 状態管理 ---
+            let db = null;
+            let connection = null;
+            let activeMemoId = null;
+            let mode = 'normal';
+            let selectedMessageId = null;
+            let selectedItemIndex = -1;
+            let editingMessageId = null;
+            let jj_last_press = 0;
+            let gg_last_press = 0;
+            let completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
 
-        // --- ヘルパー関数 ---
-        const formatDate = (timestamp) => {
-            if (!timestamp) return '';
-            const date = new Date(timestamp);
-            const year = date.getFullYear();
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
-            const hours = String(date.getHours()).padStart(2, '0');
-            const minutes = String(date.getMinutes()).padStart(2, '0');
-            const seconds = String(date.getSeconds()).padStart(2, '0');
-            return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
-        };
-
-        // --- データ操作関数 ---
-        const loadData = () => {
-            const savedData = localStorage.getItem(STORAGE_KEY);
-            if (savedData) {
-                try {
-                    data = JSON.parse(savedData);
-                    if (!data.memos || !data.messages) {
-                        initializeDefaultData();
-                    }
-                } catch(e) {
-                    console.error("データの読み込みに失敗しました:", e);
-                    initializeDefaultData();
-                }
-            } else {
-                initializeDefaultData();
-            }
-            activeMemoId = data.memos.length > 0 ? data.memos[0].id : null;
-        };
-
-        const initializeDefaultData = () => {
-            const now = Date.now();
-            data = {
-                memos: [{ id: now, name: 'general-memo', createdAt: now }],
-                messages: { [now]: [] }
+            // --- ヘルパー関数 ---
+            const formatDate = (timestamp) => {
+                if (!timestamp) return '';
+                const date = new Date(timestamp);
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                const hours = String(date.getHours()).padStart(2, '0');
+                const minutes = String(date.getMinutes()).padStart(2, '0');
+                const seconds = String(date.getSeconds()).padStart(2, '0');
+                return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
             };
-            saveData();
-        };
 
-        const saveData = () => {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        };
+            const escapeHTML = (str) => String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m]);
 
-        // --- レンダリング関数 ---
-        const render = () => {
-            renderSidebar();
-            renderMainContent();
-        };
+            // --- DuckDB 初期化とスキーマ設定 ---
+            const initDB = async () => {
+                const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+                const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+                const worker_url = URL.createObjectURL(
+                    new Blob([`importScripts("${bundle.mainWorker}");`], {type: 'text/javascript'})
+                );
+                const worker = new Worker(worker_url);
+                const logger = new duckdb.ConsoleLogger();
+                db = new duckdb.AsyncDuckDB(logger, worker);
+                await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+                URL.revokeObjectURL(worker_url);
 
-        const renderSidebar = () => {
-            memoList.innerHTML = '';
-            data.memos.forEach(memo => {
-                const li = document.createElement('li');
-                li.className = `memo-item flex items-center justify-between px-2 py-1 rounded cursor-pointer hover:bg-zinc-700 ${memo.id === activeMemoId ? 'bg-zinc-700 text-white' : ''}`;
-                li.dataset.memoId = memo.id;
-                li.innerHTML = `
-                    <div class="flex items-center overflow-hidden">
-                        <i class="fas fa-hashtag w-5 text-center text-gray-400"></i>
-                        <span class="ml-2 truncate">${escapeHTML(memo.name)}</span>
-                    </div>
-                    <div class="memo-actions hidden space-x-2 text-gray-400">
-                        <button class="rename-btn hover:text-white"><i class="fas fa-pen"></i></button>
-                        <button class="delete-btn hover:text-white"><i class="fas fa-trash-alt"></i></button>
-                    </div>
-                `;
-                memoList.appendChild(li);
-            });
-        };
+                // ★修正箇所: データベースの初期化方法を変更
+                // まずインメモリで起動し、その後OPFS上のファイルをアタッチする
+                await db.open(); // インメモリDBとして起動
+                connection = await db.connect();
 
-        const renderMainContent = () => {
-            if (activeMemoId && data.memos.length > 0) {
-                footerInputArea.style.display = 'block';
-                const activeMemo = data.memos.find(m => m.id === activeMemoId);
-                const formattedDate = formatDate(activeMemo.createdAt);
-                memoTitle.textContent = `${activeMemo.name} - ${formattedDate}`;
-                memoInput.placeholder = `#${activeMemo.name} にメモする (iで入力開始)`;
-                renderMessages();
-            } else {
-                memoTitle.textContent = 'メモがありません';
-                messageContainer.innerHTML = `
-                    <div class="text-center text-gray-500 mt-10">
-                        <p class="text-lg">メモがありません。</p>
-                        <p>コマンド「:e {メモ名}」で新しいメモを作成してください。</p>
-                    </div>`;
-                footerInputArea.style.display = 'none';
-            }
-        };
+                // OPFS上のファイルをアタッチ
+                await connection.query("ATTACH 'memo.db';");
+                // アタッチしたDBをデフォルトとして使用
+                await connection.query("USE memo;");
+            };
 
-        const renderMessages = () => {
-            messageContainer.innerHTML = '';
-            const messages = data.messages[activeMemoId] || [];
-            if (messages.length === 0) {
-                messageContainer.innerHTML = `
-                    <div class="text-center text-gray-500 mt-10">
-                        <p class="text-lg">まだメッセージがありません。</p>
-                        <p>下の入力欄から最初のメッセージを投稿してみましょう！</p>
-                    </div>`;
-                return;
-            }
-            messages.forEach(msg => {
-                const isSelected = msg.id === selectedMessageId;
-                const isEditing = msg.id === editingMessageId;
+            const setupSchema = async () => {
+                await connection.query(`
+                    CREATE TABLE IF NOT EXISTS memos (
+                        id BIGINT PRIMARY KEY,
+                        name VARCHAR,
+                        createdAt TIMESTAMP
+                    );
+                `);
+                await connection.query(`
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id BIGINT PRIMARY KEY,
+                        memo_id BIGINT,
+                        text VARCHAR,
+                        timestamp VARCHAR
+                    );
+                `);
+            };
 
-                const msgElement = document.createElement('div');
-                msgElement.dataset.messageId = msg.id;
-                msgElement.classList.add('flex', 'items-start', 'mb-2', 'p-2', 'message-item');
-                if (isSelected) {
-                    msgElement.classList.add('selected');
-                }
-
-                const unsafeHTML = marked.parse(msg.text);
-                const safeHTML = DOMPurify.sanitize(unsafeHTML);
-
-                if (isEditing) {
-                    msgElement.innerHTML = `
-                        <div class="w-10 h-10 rounded-full bg-indigo-500 flex-shrink-0 flex items-center justify-center text-white font-bold mr-4">U</div>
-                        <div class="flex-grow">
-                            <textarea id="edit-input-${msg.id}" data-message-id="${msg.id}" class="w-full p-2 bg-zinc-700 text-gray-200 rounded-lg focus:outline-none resize-y" rows="4">${msg.text}</textarea>
-                        </div>
-                    `;
-                } else {
-                    msgElement.innerHTML = `
-                        <div class="w-10 h-10 rounded-full bg-indigo-500 flex-shrink-0 flex items-center justify-center text-white font-bold mr-4">U</div>
-                        <div class="flex-grow">
-                            <div class="flex items-baseline">
-                                <span class="font-bold text-gray-100 mr-2">User</span>
-                                <span class="text-xs text-gray-500">${msg.timestamp}</span>
-                            </div>
-                            <div class="message-body text-gray-300">${safeHTML}</div>
-                        </div>
-                    `;
-                }
-                messageContainer.appendChild(msgElement);
-            });
-
-            if (editingMessageId) {
-                const editInput = document.getElementById(`edit-input-${editingMessageId}`);
-                if (editInput) {
-                    editInput.style.height = 'auto';
-                    editInput.style.height = (editInput.scrollHeight) + 'px';
-                    editInput.focus();
-                    editInput.selectionStart = editInput.selectionEnd = editInput.value.length;
-                }
-            }
-        };
-
-        // --- モード管理 ---
-        const enterNormalMode = () => {
-            mode = 'normal';
-            editingMessageId = null;
-            commandInput.value = '';
-            memoInput.blur();
-            commandBar.style.display = 'none';
-            commandInput.blur();
-            completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
-        };
-
-        const enterInsertMode = () => {
-            mode = 'insert';
-            selectedMessageId = null;
-            selectedItemIndex = -1;
-            updateSelectionUI();
-            memoInput.focus();
-        };
-
-        const enterEditMessageMode = () => {
-            if (!selectedMessageId) return;
-            mode = 'edit-message';
-            editingMessageId = selectedMessageId;
-            renderMessages();
-        };
-
-        const enterCommandMode = () => {
-            mode = 'command';
-            commandBar.style.display = 'flex';
-            commandInput.focus();
-        };
-
-        const updateSelectionUI = () => {
-            const messages = data.messages[activeMemoId] || [];
-            const messageElements = messageContainer.querySelectorAll('.message-item');
-
-            // Clear all selections
-            messageElements.forEach(el => el.classList.remove('selected'));
-            memoInputContainer.classList.remove('border-blue-500');
-            selectedMessageId = null;
-
-            if (selectedItemIndex >= 0 && selectedItemIndex < messages.length) {
-                // Select a message
-                selectedMessageId = messages[selectedItemIndex].id;
-                const selectedEl = messageContainer.querySelector(`[data-message-id='${selectedMessageId}']`);
-                if (selectedEl) {
-                    selectedEl.classList.add('selected');
-                    selectedEl.scrollIntoView({ block: 'nearest' });
-                }
-            } else if (selectedItemIndex === messages.length) {
-                // Select the input area
-                memoInputContainer.classList.add('border-blue-500');
-                memoInput.scrollIntoView({ block: 'nearest' });
-            }
-        };
-
-        // --- モーダル処理 ---
-        const openModal = (type, memoId = null) => {
-            if (type === 'add') {
-                modalTitleEl.textContent = '新しいメモを作成';
-                modalInput.value = '';
-                modalOkBtn.onclick = () => createNewMemoFromModal();
-            } else if (type === 'rename' && memoId) {
-                const memo = data.memos.find(m => m.id === memoId);
-                modalTitleEl.textContent = 'メモ名を変更';
-                modalInput.value = memo.name;
-                modalOkBtn.onclick = () => renameMemo(memoId);
-            }
-            memoModal.style.display = 'flex';
-            modalInput.focus();
-        };
-
-        const closeModal = () => {
-            memoModal.style.display = 'none';
-            deleteConfirmModal.style.display = 'none';
-            enterNormalMode();
-        };
-
-        // --- CRUD操作 ---
-        const createNewMemoFromModal = () => {
-            const name = modalInput.value.trim();
-            if (name) handleEditCommand(name);
-            closeModal();
-        };
-
-        const handleEditCommand = (memoName) => {
-            if (!memoName) return;
-            const existingMemo = data.memos.find(m => m.name === memoName);
-            if (existingMemo) {
-                activeMemoId = existingMemo.id;
-            } else {
-                const now = Date.now();
-                data.memos.push({ id: now, name: memoName, createdAt: now });
-                data.messages[now] = [];
-                activeMemoId = now;
-            }
-            saveData();
-            render();
-        };
-
-        const renameMemo = (memoId) => {
-            const newName = modalInput.value.trim();
-            const memo = data.memos.find(m => m.id === memoId);
-            if (newName && newName !== memo.name && !data.memos.some(m => m.name === newName)) {
-                memo.name = newName;
-                saveData();
-                render();
-                closeModal();
-            } else if (!newName) {
-                alert('メモ名を入力してください。');
-            } else if (newName !== memo.name) {
-                alert('同じ名前のメモが既に存在します。');
-            } else {
-                closeModal();
-            }
-        };
-
-        const confirmDeleteMemo = (memoId) => {
-            const memo = data.memos.find(m => m.id === memoId);
-            if (!memo) return;
-            deleteConfirmText.textContent = `メモ「${escapeHTML(memo.name)}」を削除します。この操作は取り消せません。`;
-            deleteConfirmModal.style.display = 'flex';
-            deleteOkBtn.onclick = () => deleteMemo(memoId);
-        };
-
-        const deleteMemo = (memoId) => {
-            if (!memoId) return;
-            const currentIndex = data.memos.findIndex(m => m.id === memoId);
-            data.memos = data.memos.filter(m => m.id !== memoId);
-            delete data.messages[memoId];
-            if (activeMemoId === memoId) {
-                if (data.memos.length > 0) {
-                    const newIndex = Math.min(currentIndex, data.memos.length - 1);
-                    activeMemoId = data.memos[newIndex].id;
+            const loadInitialState = async () => {
+                const result = await connection.query('SELECT id FROM memos ORDER BY createdAt DESC LIMIT 1;');
+                const memos = result.toArray().map(row => row.toJSON());
+                if (memos.length > 0) {
+                    activeMemoId = memos[0].id;
                 } else {
                     activeMemoId = null;
                 }
-            }
-            saveData();
-            render();
-            closeModal();
-        };
+            };
 
-        const addMessage = () => {
-            const text = memoInput.value.trim();
-            if (text && activeMemoId) {
-                const timestamp = new Date().toLocaleString('ja-JP');
-                const newMessage = { id: Date.now(), text, timestamp };
-                if (!data.messages[activeMemoId]) data.messages[activeMemoId] = [];
-                data.messages[activeMemoId].push(newMessage);
-                saveData();
-                renderMessages();
-                memoInput.value = '';
-                memoInput.style.height = 'auto';
-            }
-        };
+            // --- レンダリング関数 ---
+            const render = async () => {
+                await renderSidebar();
+                await renderMainContent();
+            };
 
-        const parseAndExecuteCommand = (commandText) => {
-            const [command, ...args] = commandText.split(/\s+/);
-            const arg = args.join(' ');
-            switch(command) {
-                case 'e':
-                    handleEditCommand(arg);
-                    break;
-                case 'bd':
-                    if (arg) {
-                        const memoToDelete = data.memos.find(m => m.name === arg);
-                        if (memoToDelete) {
-                            deleteMemo(memoToDelete.id);
-                        }
-                    } else {
-                        deleteMemo(activeMemoId);
+            const renderSidebar = async () => {
+                const result = await connection.query('SELECT * FROM memos ORDER BY createdAt DESC;');
+                const memos = result.toArray().map(row => row.toJSON());
+
+                memoList.innerHTML = '';
+                memos.forEach(memo => {
+                    const li = document.createElement('li');
+                    li.className = `memo-item flex items-center justify-between px-2 py-1 rounded cursor-pointer hover:bg-zinc-700 ${memo.id === activeMemoId ? 'bg-zinc-700 text-white' : ''}`;
+                    li.dataset.memoId = memo.id;
+                    li.innerHTML = `
+                        <div class="flex items-center overflow-hidden">
+                            <i class="fas fa-hashtag w-5 text-center text-gray-400"></i>
+                            <span class="ml-2 truncate">${escapeHTML(memo.name)}</span>
+                        </div>
+                        <div class="memo-actions hidden space-x-2 text-gray-400">
+                            <button class="rename-btn hover:text-white"><i class="fas fa-pen"></i></button>
+                            <button class="delete-btn hover:text-white"><i class="fas fa-trash-alt"></i></button>
+                        </div>
+                    `;
+                    memoList.appendChild(li);
+                });
+            };
+
+            const renderMainContent = async () => {
+                const memosResult = await connection.query('SELECT * FROM memos');
+                if (activeMemoId && memosResult.numRows > 0) {
+                    footerInputArea.style.display = 'block';
+                    const activeMemoResult = await connection.query(`SELECT * FROM memos WHERE id = ${activeMemoId}`);
+                    const activeMemoArray = activeMemoResult.toArray().map(row => row.toJSON());
+
+                    if (activeMemoArray.length === 0) {
+                         await loadInitialState();
+                         await render();
+                         return;
                     }
-                    break;
-            }
-        };
+                    const activeMemo = activeMemoArray[0];
 
-        // --- イベントリスナー ---
-        addMemoBtn.addEventListener('click', () => openModal('add'));
+                    const formattedDate = formatDate(activeMemo.createdAt);
+                    memoTitle.textContent = `${activeMemo.name} - ${formattedDate}`;
+                    memoInput.placeholder = `#${activeMemo.name} にメモする (iで入力開始)`;
+                    await renderMessages();
+                } else {
+                    memoTitle.textContent = 'メモがありません';
+                    messageContainer.innerHTML = `
+                        <div class="text-center text-gray-500 mt-10">
+                            <p class="text-lg">メモがありません。</p>
+                            <p>コマンド「:e {メモ名}」で新しいメモを作成してください。</p>
+                        </div>`;
+                    footerInputArea.style.display = 'none';
+                }
+            };
 
-        memoList.addEventListener('click', (e) => {
-            const memoItem = e.target.closest('.memo-item');
-            if (!memoItem) return;
-            const memoId = Number(memoItem.dataset.memoId);
-            if (e.target.closest('.rename-btn')) {
-                openModal('rename', memoId);
-            } else if (e.target.closest('.delete-btn')) {
-                confirmDeleteMemo(memoId);
-            } else {
-                activeMemoId = memoId;
+            const renderMessages = async () => {
+                messageContainer.innerHTML = '';
+                if (!activeMemoId) return;
+
+                const messagesResult = await connection.query(`SELECT * FROM messages WHERE memo_id = ${activeMemoId} ORDER BY id ASC;`);
+                const messages = messagesResult.toArray().map(row => row.toJSON());
+
+                if (messages.length === 0) {
+                    messageContainer.innerHTML = `
+                        <div class="text-center text-gray-500 mt-10">
+                            <p class="text-lg">まだメッセージがありません。</p>
+                            <p>下の入力欄から最初のメッセージを投稿してみましょう！</p>
+                        </div>`;
+                    return;
+                }
+                messages.forEach(msg => {
+                    const isSelected = msg.id === selectedMessageId;
+                    const isEditing = msg.id === editingMessageId;
+
+                    const msgElement = document.createElement('div');
+                    msgElement.dataset.messageId = msg.id;
+                    msgElement.classList.add('flex', 'items-start', 'mb-2', 'p-2', 'message-item');
+                    if (isSelected) msgElement.classList.add('selected');
+
+                    const unsafeHTML = marked.parse(msg.text);
+                    const safeHTML = DOMPurify.sanitize(unsafeHTML);
+
+                    if (isEditing) {
+                        msgElement.innerHTML = `
+                            <div class="w-10 h-10 rounded-full bg-indigo-500 flex-shrink-0 flex items-center justify-center text-white font-bold mr-4">U</div>
+                            <div class="flex-grow">
+                                <textarea id="edit-input-${msg.id}" data-message-id="${msg.id}" class="w-full p-2 bg-zinc-700 text-gray-200 rounded-lg focus:outline-none resize-y" rows="4">${escapeHTML(msg.text)}</textarea>
+                            </div>
+                        `;
+                    } else {
+                        msgElement.innerHTML = `
+                            <div class="w-10 h-10 rounded-full bg-indigo-500 flex-shrink-0 flex items-center justify-center text-white font-bold mr-4">U</div>
+                            <div class="flex-grow">
+                                <div class="flex items-baseline">
+                                    <span class="font-bold text-gray-100 mr-2">User</span>
+                                    <span class="text-xs text-gray-500">${msg.timestamp}</span>
+                                </div>
+                                <div class="message-body text-gray-300">${safeHTML}</div>
+                            </div>
+                        `;
+                    }
+                    messageContainer.appendChild(msgElement);
+                });
+
+                if (editingMessageId) {
+                    const editInput = document.getElementById(`edit-input-${editingMessageId}`);
+                    if (editInput) {
+                        editInput.style.height = 'auto';
+                        editInput.style.height = (editInput.scrollHeight) + 'px';
+                        editInput.focus();
+                        editInput.selectionStart = editInput.selectionEnd = editInput.value.length;
+                    }
+                }
+            };
+
+            // --- モード管理 ---
+            const enterNormalMode = () => {
+                mode = 'normal';
+                editingMessageId = null;
+                commandInput.value = '';
+                memoInput.blur();
+                commandBar.style.display = 'none';
+                commandInput.blur();
+                completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
+            };
+
+            const enterInsertMode = () => {
+                mode = 'insert';
                 selectedMessageId = null;
                 selectedItemIndex = -1;
-                render();
-            }
-        });
+                updateSelectionUI();
+                memoInput.focus();
+            };
 
-        messageContainer.addEventListener('keydown', e => {
-            if (mode === 'edit-message' && e.target.id.startsWith('edit-input-')) {
-                const saveChanges = () => {
-                    const messageId = Number(e.target.dataset.messageId);
-                    const msgIndex = data.messages[activeMemoId].findIndex(m => m.id === messageId);
-                    if (msgIndex !== -1) {
-                        data.messages[activeMemoId][msgIndex].text = e.target.value;
-                        saveData();
+            const enterEditMessageMode = async () => {
+                if (!selectedMessageId) return;
+                mode = 'edit-message';
+                editingMessageId = selectedMessageId;
+                await renderMessages();
+            };
+
+            const enterCommandMode = () => {
+                mode = 'command';
+                commandBar.style.display = 'flex';
+                commandInput.focus();
+            };
+
+            const updateSelectionUI = async () => {
+                if (!activeMemoId) return;
+                const messagesResult = await connection.query(`SELECT id FROM messages WHERE memo_id = ${activeMemoId} ORDER BY id ASC;`);
+                const messages = messagesResult.toArray().map(row => row.toJSON());
+
+                const messageElements = messageContainer.querySelectorAll('.message-item');
+                messageElements.forEach(el => el.classList.remove('selected'));
+                memoInputContainer.classList.remove('border-blue-500');
+                selectedMessageId = null;
+
+                if (selectedItemIndex >= 0 && selectedItemIndex < messages.length) {
+                    selectedMessageId = messages[selectedItemIndex].id;
+                    const selectedEl = messageContainer.querySelector(`[data-message-id='${selectedMessageId}']`);
+                    if (selectedEl) {
+                        selectedEl.classList.add('selected');
+                        selectedEl.scrollIntoView({ block: 'nearest' });
                     }
-                    enterNormalMode();
-                    renderMessages();
-                };
+                } else if (selectedItemIndex === messages.length) {
+                    memoInputContainer.classList.add('border-blue-500');
+                    memoInput.scrollIntoView({ block: 'nearest' });
+                }
+            };
 
+            // --- モーダル処理 ---
+            const openModal = async (type, memoId = null) => {
+                if (type === 'add') {
+                    modalTitleEl.textContent = '新しいメモを作成';
+                    modalInput.value = '';
+                    modalOkBtn.onclick = () => createNewMemoFromModal();
+                } else if (type === 'rename' && memoId) {
+                    const result = await connection.query(`SELECT name FROM memos WHERE id = ${memoId}`);
+                    const memo = result.toArray().map(row => row.toJSON())[0];
+                    modalTitleEl.textContent = 'メモ名を変更';
+                    modalInput.value = memo.name;
+                    modalOkBtn.onclick = () => renameMemo(memoId);
+                }
+                memoModal.style.display = 'flex';
+                modalInput.focus();
+            };
+
+            const closeModal = () => {
+                memoModal.style.display = 'none';
+                deleteConfirmModal.style.display = 'none';
+                enterNormalMode();
+            };
+
+            // --- CRUD操作 ---
+            const createNewMemoFromModal = async () => {
+                const name = modalInput.value.trim();
+                if (name) await handleEditCommand(name);
+                closeModal();
+            };
+
+            const handleEditCommand = async (memoName) => {
+                if (!memoName) return;
+                const pStmt = await connection.prepare('SELECT id FROM memos WHERE name = ?');
+                const result = await pStmt.query(memoName);
+                const existingMemo = result.toArray().map(row => row.toJSON());
+                await pStmt.close();
+
+                if (existingMemo.length > 0) {
+                    activeMemoId = existingMemo[0].id;
+                } else {
+                    const now = Date.now();
+                    const insertStmt = await connection.prepare('INSERT INTO memos (id, name, createdAt) VALUES (?, ?, ?)');
+                    await insertStmt.query(now, memoName, new Date());
+                    await insertStmt.close();
+                    activeMemoId = now;
+                }
+                await render();
+            };
+
+            const renameMemo = async (memoId) => {
+                const newName = modalInput.value.trim();
+                if (newName) {
+                    const pStmt = await connection.prepare('UPDATE memos SET name = ? WHERE id = ?');
+                    await pStmt.query(newName, memoId);
+                    await pStmt.close();
+                    await render();
+                }
+                closeModal();
+            };
+
+            const confirmDeleteMemo = async (memoId) => {
+                const result = await connection.query(`SELECT name FROM memos WHERE id = ${memoId}`);
+                const memo = result.toArray().map(row => row.toJSON())[0];
+                if (!memo) return;
+                deleteConfirmText.textContent = `メモ「${escapeHTML(memo.name)}」を削除します。この操作は取り消せません。`;
+                deleteConfirmModal.style.display = 'flex';
+                deleteOkBtn.onclick = () => deleteMemo(memoId);
+            };
+
+            const deleteMemo = async (memoId) => {
+                if (!memoId) return;
+                await connection.query(`DELETE FROM messages WHERE memo_id = ${memoId}`);
+                await connection.query(`DELETE FROM memos WHERE id = ${memoId}`);
+
+                if (activeMemoId === memoId) {
+                    await loadInitialState();
+                }
+                await render();
+                closeModal();
+            };
+
+            const addMessage = async () => {
+                const text = memoInput.value.trim();
+                if (text && activeMemoId) {
+                    const timestamp = new Date().toLocaleString('ja-JP');
+                    const newMessageId = Date.now();
+                    const pStmt = await connection.prepare('INSERT INTO messages (id, memo_id, text, timestamp) VALUES (?, ?, ?, ?)');
+                    await pStmt.query(newMessageId, activeMemoId, text, timestamp);
+                    await pStmt.close();
+
+                    await renderMessages();
+                    memoInput.value = '';
+                    memoInput.style.height = 'auto';
+                }
+            };
+
+            const parseAndExecuteCommand = async (commandText) => {
+                const [command, ...args] = commandText.split(/\s+/);
+                const arg = args.join(' ');
+                switch(command) {
+                    case 'e':
+                        await handleEditCommand(arg);
+                        break;
+                    case 'bd':
+                        if (arg) {
+                            const pStmt = await connection.prepare('SELECT id FROM memos WHERE name = ?');
+                            const result = await pStmt.query(arg);
+                            const memoToDelete = result.toArray().map(row => row.toJSON())[0];
+                            await pStmt.close();
+                            if (memoToDelete) {
+                                await deleteMemo(memoToDelete.id);
+                            }
+                        } else {
+                            await deleteMemo(activeMemoId);
+                        }
+                        break;
+                }
+            };
+
+            // --- イベントリスナー ---
+            addMemoBtn.addEventListener('click', () => openModal('add'));
+
+            memoList.addEventListener('click', async (e) => {
+                const memoItem = e.target.closest('.memo-item');
+                if (!memoItem) return;
+                const memoId = Number(memoItem.dataset.memoId);
+                if (e.target.closest('.rename-btn')) {
+                    await openModal('rename', memoId);
+                } else if (e.target.closest('.delete-btn')) {
+                    await confirmDeleteMemo(memoId);
+                } else {
+                    activeMemoId = memoId;
+                    selectedMessageId = null;
+                    selectedItemIndex = -1;
+                    await render();
+                }
+            });
+
+            messageContainer.addEventListener('keydown', async e => {
+                if (mode === 'edit-message' && e.target.id.startsWith('edit-input-')) {
+                    const saveChanges = async () => {
+                        const messageId = Number(e.target.dataset.messageId);
+                        const pStmt = await connection.prepare('UPDATE messages SET text = ? WHERE id = ?');
+                        await pStmt.query(e.target.value, messageId);
+                        await pStmt.close();
+                        enterNormalMode();
+                        await renderMessages();
+                    };
+
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        await saveChanges();
+                    } else if (e.key === 'j') {
+                        const now = Date.now();
+                        if (now - jj_last_press < 300) {
+                            e.preventDefault();
+                            e.target.value = e.target.value.slice(0, -1);
+                            await saveChanges();
+                        }
+                        jj_last_press = now;
+                    } else {
+                        jj_last_press = 0;
+                    }
+                }
+            });
+
+            memoInput.addEventListener('focus', () => {
+                memoInputContainer.classList.add('border-blue-500');
+                if (mode !== 'insert') enterInsertMode();
+            });
+            memoInput.addEventListener('blur', () => {
+                if (mode === 'insert') enterNormalMode();
+                memoInputContainer.classList.remove('border-blue-500');
+            });
+            memoInput.addEventListener('keydown', async (e) => {
                 if (e.key === 'Escape') {
                     e.preventDefault();
-                    saveChanges();
-                } else if (e.key === 'j') {
+                    memoInput.blur();
+                    return;
+                }
+                if (e.key === 'j') {
                     const now = Date.now();
                     if (now - jj_last_press < 300) {
                         e.preventDefault();
-                        e.target.value = e.target.value.slice(0, -1); // Remove the extra 'j'
-                        saveChanges();
+                        e.stopPropagation();
+                        memoInput.value = memoInput.value.slice(0, -1);
+                        if (!activeMemoId) return;
+                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
+                        const count = result.toArray()[0].toJSON().count;
+                        selectedItemIndex = Number(count);
+                        memoInput.blur();
+                        await updateSelectionUI();
                     }
                     jj_last_press = now;
                 } else {
                     jj_last_press = 0;
                 }
-            }
-        });
-
-        memoInput.addEventListener('focus', () => {
-            memoInputContainer.classList.add('border-blue-500');
-            if (mode !== 'insert') {
-                enterInsertMode();
-            }
-        });
-        memoInput.addEventListener('blur', () => {
-            if (mode === 'insert') {
-                enterNormalMode();
-            }
-            memoInputContainer.classList.remove('border-blue-500');
-        });
-        memoInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                memoInput.blur();
-                return;
-            }
-            if (e.key === 'j') {
-                const now = Date.now();
-                if (now - jj_last_press < 300) {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                     e.preventDefault();
-                    e.stopPropagation();
-                    memoInput.value = memoInput.value.slice(0, -1);
-                    const messages = data.messages[activeMemoId] || [];
-                    selectedItemIndex = messages.length;
-                    memoInput.blur();
-                    updateSelectionUI();
+                    await addMessage();
                 }
-                jj_last_press = now;
-            } else {
-                jj_last_press = 0;
-            }
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                e.preventDefault();
-                addMessage();
-            }
-        });
+            });
 
-        memoInput.addEventListener('input', () => {
-            memoInput.style.height = 'auto';
-            memoInput.style.height = (memoInput.scrollHeight) + 'px';
-        });
+            memoInput.addEventListener('input', () => {
+                memoInput.style.height = 'auto';
+                memoInput.style.height = (memoInput.scrollHeight) + 'px';
+            });
 
-        commandInput.addEventListener('keydown', (e) => {
-            const value = commandInput.value;
-            const [command, ...args] = value.split(/\s+/);
+            commandInput.addEventListener('keydown', async (e) => {
+                const value = commandInput.value;
+                const [command, ...args] = value.split(/\s+/);
 
-            if (e.key === 'Tab') {
-                e.preventDefault();
-                if (command !== 'e' && command !== 'bd') {
-                    completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
-                    return;
-                }
-
-                const currentPartial = args.join(' ');
-
-                if (completionState.matches.length === 0 || currentPartial !== completionState.matches[completionState.index]) {
-                    const foundMatches = data.memos
-                        .filter(memo => memo.name.startsWith(currentPartial))
-                        .sort((a, b) => a.name.localeCompare(b.name));
-
-                    if (foundMatches.length > 0) {
-                        completionState = {
-                            baseCommand: command,
-                            originalPartial: currentPartial,
-                            matches: foundMatches.map(m => m.name),
-                            index: 0
-                        };
-                        commandInput.value = `${command} ${completionState.matches[0]}`;
-                    }
-                } else {
-                    completionState.index = (completionState.index + 1) % completionState.matches.length;
-                    commandInput.value = `${command} ${completionState.matches[completionState.index]}`;
-                }
-                return;
-            } else if (e.ctrlKey && e.key.toLowerCase() === 'w') {
-                e.preventDefault();
-                const cursorPosition = commandInput.selectionStart;
-                if (cursorPosition === 0) return;
-
-                const textBeforeCursor = value.substring(0, cursorPosition);
-                const lastSpaceIndex = textBeforeCursor.trimEnd().lastIndexOf(' ');
-
-                const startIndex = lastSpaceIndex === -1 ? 0 : lastSpaceIndex + 1;
-
-                const newValue = value.substring(0, startIndex) + value.substring(cursorPosition);
-                commandInput.value = newValue;
-                commandInput.selectionStart = commandInput.selectionEnd = startIndex;
-            } else if (e.key === 'Escape' || (e.ctrlKey && e.key.toLowerCase() === 'c')) {
-                e.preventDefault();
-                enterNormalMode();
-            } else if (e.key === 'Enter') {
-                e.preventDefault();
-                parseAndExecuteCommand(commandInput.value.trim());
-                enterNormalMode();
-            }
-
-            if (e.key !== 'Tab') {
-               completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
-            }
-        });
-        commandInput.addEventListener('blur', () => enterNormalMode());
-
-        modalCancelBtn.addEventListener('click', closeModal);
-        deleteCancelBtn.addEventListener('click', closeModal);
-        deleteOkBtn.addEventListener('click', closeModal);
-        modalOkBtn.addEventListener('click', () => modalOkBtn.onclick());
-        modalInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') modalOkBtn.onclick();
-        });
-
-        document.addEventListener('keydown', (e) => {
-            if (mode === 'normal') {
-                if (e.key === 'i' || e.key === 'a') {
+                if (e.key === 'Tab') {
                     e.preventDefault();
-                    if (selectedItemIndex >= 0 && selectedItemIndex < (data.messages[activeMemoId] || []).length) {
-                        enterEditMessageMode();
-                    } else {
-                        enterInsertMode();
+                    if (command !== 'e' && command !== 'bd') {
+                        completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
+                        return;
                     }
-                } else if (e.key === ':' || e.key === ';') {
-                    e.preventDefault();
-                    enterCommandMode();
-                } else if (e.key === 'j' || e.key === 'k') {
-                    e.preventDefault();
-                    const messages = data.messages[activeMemoId] || [];
-                    const itemCount = messages.length;
+                    const currentPartial = args.join(' ');
+                    if (completionState.matches.length === 0 || currentPartial !== completionState.matches[completionState.index]) {
+                        const pStmt = await connection.prepare('SELECT name FROM memos WHERE name LIKE ? ORDER BY name');
+                        const result = await pStmt.query(currentPartial + '%');
+                        const foundMatches = result.toArray().map(row => row.toJSON().name);
+                        await pStmt.close();
 
-                    if (e.key === 'j') {
-                        selectedItemIndex = Math.min(selectedItemIndex + 1, itemCount);
-                    } else { // 'k'
-                        selectedItemIndex = Math.max(selectedItemIndex - 1, -1);
-                    }
-                    updateSelectionUI();
-
-                } else if (e.key === 'g') {
-                    const now = Date.now();
-                    if (now - gg_last_press < 400) { // gg
-                        e.preventDefault();
-                        const messages = data.messages[activeMemoId] || [];
-                        if (messages.length > 0) {
-                            selectedItemIndex = 0;
-                            updateSelectionUI();
+                        if (foundMatches.length > 0) {
+                            completionState = { baseCommand: command, originalPartial: currentPartial, matches: foundMatches, index: 0 };
+                            commandInput.value = `${command} ${completionState.matches[0]}`;
                         }
-                        gg_last_press = 0;
                     } else {
-                        gg_last_press = now;
+                        completionState.index = (completionState.index + 1) % completionState.matches.length;
+                        commandInput.value = `${command} ${completionState.matches[completionState.index]}`;
                     }
-                } else if (e.shiftKey && e.key.toUpperCase() === 'G') {
+                    return;
+                } else if (e.ctrlKey && e.key.toLowerCase() === 'w') {
                     e.preventDefault();
-                    const messages = data.messages[activeMemoId] || [];
-                    selectedItemIndex = messages.length;
-                    updateSelectionUI();
-                } else if (e.shiftKey && e.key.toUpperCase() === 'J') {
+                    const cursorPosition = commandInput.selectionStart;
+                    if (cursorPosition === 0) return;
+                    const textBeforeCursor = value.substring(0, cursorPosition);
+                    const lastSpaceIndex = textBeforeCursor.trimEnd().lastIndexOf(' ');
+                    const startIndex = lastSpaceIndex === -1 ? 0 : lastSpaceIndex + 1;
+                    const newValue = value.substring(0, startIndex) + value.substring(cursorPosition);
+                    commandInput.value = newValue;
+                    commandInput.selectionStart = commandInput.selectionEnd = startIndex;
+                } else if (e.key === 'Escape' || (e.ctrlKey && e.key.toLowerCase() === 'c')) {
                     e.preventDefault();
-                    if (data.memos.length < 2) return;
-                    const currentIndex = data.memos.findIndex(m => m.id === activeMemoId);
-                    const nextIndex = (currentIndex + 1) % data.memos.length;
-                    activeMemoId = data.memos[nextIndex].id;
-                    selectedMessageId = null;
-                    selectedItemIndex = -1;
-                    render();
-                } else if (e.shiftKey && e.key.toUpperCase() === 'K') {
+                    enterNormalMode();
+                } else if (e.key === 'Enter') {
                     e.preventDefault();
-                    if (data.memos.length < 2) return;
-                    const currentIndex = data.memos.findIndex(m => m.id === activeMemoId);
-                    const prevIndex = (currentIndex - 1 + data.memos.length) % data.memos.length;
-                    activeMemoId = data.memos[prevIndex].id;
-                    selectedMessageId = null;
-                    selectedItemIndex = -1;
-                    render();
+                    await parseAndExecuteCommand(commandInput.value.trim());
+                    enterNormalMode();
                 }
+                if (e.key !== 'Tab') {
+                   completionState = { baseCommand: '', originalPartial: '', matches: [], index: -1 };
+                }
+            });
+            commandInput.addEventListener('blur', () => enterNormalMode());
+
+            modalCancelBtn.addEventListener('click', closeModal);
+            deleteCancelBtn.addEventListener('click', closeModal);
+            deleteOkBtn.addEventListener('click', () => deleteOkBtn.onclick());
+            modalOkBtn.addEventListener('click', () => modalOkBtn.onclick());
+            modalInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') modalOkBtn.onclick();
+            });
+
+            document.addEventListener('keydown', async (e) => {
+                if (mode === 'normal' && activeMemoId) {
+                    if (e.key === 'i' || e.key === 'a') {
+                        e.preventDefault();
+                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
+                        const count = result.toArray()[0].toJSON().count;
+                        if (selectedItemIndex >= 0 && selectedItemIndex < count) {
+                            await enterEditMessageMode();
+                        } else {
+                            enterInsertMode();
+                        }
+                    } else if (e.key === ':' || e.key === ';') {
+                        e.preventDefault();
+                        enterCommandMode();
+                    } else if (e.key === 'j' || e.key === 'k') {
+                        e.preventDefault();
+                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
+                        const itemCount = Number(result.toArray()[0].toJSON().count);
+
+                        if (e.key === 'j') selectedItemIndex = Math.min(selectedItemIndex + 1, itemCount);
+                        else selectedItemIndex = Math.max(selectedItemIndex - 1, -1);
+                        await updateSelectionUI();
+                    } else if (e.key === 'g') {
+                        const now = Date.now();
+                        if (now - gg_last_press < 400) {
+                            e.preventDefault();
+                            const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
+                            if (result.toArray()[0].toJSON().count > 0) {
+                                selectedItemIndex = 0;
+                                await updateSelectionUI();
+                            }
+                            gg_last_press = 0;
+                        } else {
+                            gg_last_press = now;
+                        }
+                    } else if (e.shiftKey && e.key.toUpperCase() === 'G') {
+                        e.preventDefault();
+                        const result = await connection.query(`SELECT count(*) as count FROM messages WHERE memo_id = ${activeMemoId}`);
+                        selectedItemIndex = Number(result.toArray()[0].toJSON().count);
+                        await updateSelectionUI();
+                    } else if (e.shiftKey && (e.key.toUpperCase() === 'J' || e.key.toUpperCase() === 'K')) {
+                        e.preventDefault();
+                        const result = await connection.query('SELECT id FROM memos ORDER BY createdAt DESC');
+                        const memos = result.toArray().map(row => row.toJSON());
+                        if (memos.length < 2) return;
+                        const currentIndex = memos.findIndex(m => m.id === activeMemoId);
+                        let nextIndex;
+                        if (e.shiftKey && e.key.toUpperCase() === 'J') {
+                             nextIndex = (currentIndex + 1) % memos.length;
+                        } else {
+                             nextIndex = (currentIndex - 1 + memos.length) % memos.length;
+                        }
+                        activeMemoId = memos[nextIndex].id;
+                        selectedMessageId = null;
+                        selectedItemIndex = -1;
+                        await render();
+                    }
+                } else if (mode === 'normal' && (e.key === ':' || e.key === ';')) {
+                     e.preventDefault();
+                     enterCommandMode();
+                }
+            });
+
+            // --- 初期化 ---
+            try {
+                await initDB();
+                await setupSchema();
+                await loadInitialState();
+                await render();
+            } catch (err) {
+                console.error(err);
+                alert("データベースの初期化に失敗しました。コンソールを確認してください。");
             }
         });
-
-        // --- 初期化 ---
-        const escapeHTML = (str) => str.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m]);
-        loadData();
-        render();
-    });
     </script>
 </body>
 </html>
